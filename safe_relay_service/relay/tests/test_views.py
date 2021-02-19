@@ -1,5 +1,7 @@
 import datetime
 import logging
+from unittest import mock
+from unittest.mock import MagicMock, PropertyMock
 
 from django.contrib.auth.models import User
 from django.urls import reverse
@@ -10,6 +12,7 @@ from faker import Faker
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from gnosis.eth import EthereumNetwork
 from gnosis.eth.constants import NULL_ADDRESS
 from gnosis.eth.utils import (
     get_eth_address_with_invalid_checksum,
@@ -22,6 +25,7 @@ from safe_relay_service.gas_station.tests.factories import GasPriceFactory
 from safe_relay_service.tokens.tests.factories import TokenFactory
 
 from ..models import SafeContract, SafeMultisigTx
+from ..services.infura_relay_service import InfuraRelayService, ItxClient
 from .factories import (
     EthereumEventFactory,
     SafeContractFactory,
@@ -833,3 +837,83 @@ class TestViews(RelayTestCaseMixin, APITestCase):
             reverse("v1:private-safes"), HTTP_AUTHORIZATION="Token " + token
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    @mock.patch.object(ItxClient, "get_transaction_status", autospec=True)
+    def test_infura_tx_view(self, get_transaction_status: MagicMock):
+        get_transaction_status.return_value = {
+            "received_time": "2021-04-14T15:42:00.000Z",
+            "broadcasts": [
+                {
+                    "broadcast_time": "2021-02-14T16:28:47.978Z",
+                    "eth_tx_hash": "0x1aaf963acc5ec3e164c6c954f617e6532663b2cf42a73fce74bb0c8829021a2f",
+                    "gas_price": "7290000028",
+                }
+            ],
+        }
+        infura_tx_hash = (
+            "0x5aaf963acc5ec3ec64c6c954f617e6539663bacf42a73fce74bb0c8829088a8e"
+        )
+        response = self.client.get(
+            reverse("v1:infura-tx", args=(infura_tx_hash,)), format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data, get_transaction_status.return_value)
+
+        get_transaction_status.return_value = None
+        response = self.client.get(
+            reverse("v1:infura-tx", args=(infura_tx_hash,)), format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    @mock.patch.object(ItxClient, "get_transaction_status", autospec=True)
+    @mock.patch.object(ItxClient, "send_transaction", autospec=True)
+    @mock.patch.object(InfuraRelayService, "estimate_gas", autospec=True)
+    @mock.patch.object(
+        InfuraRelayService, "ethereum_network", new_callable=PropertyMock
+    )
+    def test_infura_txs_view(
+        self,
+        ethereum_network_mock: MagicMock,
+        estimate_gas_mock: MagicMock,
+        send_transaction_mock: MagicMock,
+        get_transaction_status: MagicMock,
+    ):
+        ethereum_network_mock.return_value = EthereumNetwork.RINKEBY
+        estimate_gas_mock.return_value = 300000
+        send_transaction_mock.return_value = (
+            "0x5aaf963acc5ec3ec64c6c954f617e6539663bacf42a73fce74bb0c8829088a8e"
+        )
+        get_transaction_status.return_value = {
+            "received_time": "2021-04-14T15:42:00.000Z",
+            "broadcasts": [
+                {
+                    "broadcast_time": "2021-02-14T16:28:47.978Z",
+                    "eth_tx_hash": "0x1aaf963acc5ec3e164c6c954f617e6532663b2cf42a73fce74bb0c8829021a2f",
+                    "gas_price": "7290000028",
+                },
+                {
+                    "broadcast_time": "2021-02-14T17:28:47.978Z",  # Last broadcasted, the rest can be discarded
+                    "eth_tx_hash": "0x2bbf963acc5ec3e164c6c954f617e6532663b2cf42a73fce74bb0c8829021a5a",
+                    "gas_price": "7290000028",
+                },
+                {
+                    "broadcast_time": "2021-02-14T16:55:47.978Z",
+                    "eth_tx_hash": "0x2bbf963acc5ec3e164c6c954f617e6532663b2cf42a73fce74bb0c8829021a5a",
+                    "gas_price": "7290000028",
+                },
+            ],
+        }
+        data = {
+            "to": Account.create().address,
+            "data": "0x123456",
+        }
+        response = self.client.post(reverse("v1:infura-txs"), format="json", data=data)
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(
+            response.data["infura_tx_hash"],
+            "0x5aaf963acc5ec3ec64c6c954f617e6539663bacf42a73fce74bb0c8829088a8e",
+        )
+        self.assertEqual(
+            response.data["tx_hash"],
+            "0x2bbf963acc5ec3e164c6c954f617e6532663b2cf42a73fce74bb0c8829021a5a",
+        )  # Last broadcasted tx

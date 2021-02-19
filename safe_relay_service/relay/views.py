@@ -27,6 +27,9 @@ from .models import EthereumEvent, SafeContract, SafeFunding, SafeMultisigTx
 from .serializers import (
     ERC20Serializer,
     ERC721Serializer,
+    InfuraTxResponseSerializer,
+    InfuraTxSerializer,
+    InfuraTxStatusResponseSerializer,
     SafeBalanceResponseSerializer,
     SafeContractSerializer,
     SafeCreationResponseSerializer,
@@ -40,6 +43,10 @@ from .serializers import (
 )
 from .services import StatsServiceProvider
 from .services.funding_service import FundingServiceException
+from .services.infura_relay_service import (
+    InfuraRelayServiceException,
+    InfuraRelayServiceProvider,
+)
 from .services.safe_creation_service import (
     SafeCreationServiceException,
     SafeCreationServiceProvider,
@@ -67,6 +74,7 @@ def custom_exception_handler(exc, context):
                 SafeCreationServiceException,
                 TransactionServiceException,
                 FundingServiceException,
+                InfuraRelayServiceException,
             ),
         ):
             response = Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY)
@@ -93,14 +101,19 @@ class AboutView(APIView):
     renderer_classes = (JSONRenderer,)
 
     def get(self, request, format=None):
-        safe_funder_public_key = (
+        safe_funder_address = (
             Account.from_key(settings.SAFE_FUNDER_PRIVATE_KEY).address
             if settings.SAFE_FUNDER_PRIVATE_KEY
             else None
         )
-        safe_sender_public_key = (
+        safe_sender_address = (
             Account.from_key(settings.SAFE_TX_SENDER_PRIVATE_KEY).address
             if settings.SAFE_TX_SENDER_PRIVATE_KEY
+            else None
+        )
+        infura_relay_sender_address = (
+            Account.from_key(settings.INFURA_RELAY_SENDER_PRIVATE_KEY).address
+            if settings.INFURA_RELAY_SENDER_PRIVATE_KEY
             else None
         )
         content = {
@@ -113,24 +126,25 @@ class AboutView(APIView):
                 "ETH_HASH_PREFIX ": settings.ETH_HASH_PREFIX,
                 "FIXED_GAS_PRICE": settings.FIXED_GAS_PRICE,
                 "GAS_STATION_NUMBER_BLOCKS": settings.GAS_STATION_NUMBER_BLOCKS,
+                "INFURA_NODE_URL": bool(settings.INFURA_NODE_URL),
+                "INFURA_RELAY_SENDER_ADDRESS": infura_relay_sender_address,
                 "NOTIFICATION_SERVICE_PASS": bool(settings.NOTIFICATION_SERVICE_PASS),
                 "NOTIFICATION_SERVICE_URI": settings.NOTIFICATION_SERVICE_URI,
                 "SAFE_ACCOUNTS_BALANCE_WARNING": settings.SAFE_ACCOUNTS_BALANCE_WARNING,
                 "SAFE_CHECK_DEPLOYER_FUNDED_DELAY": settings.SAFE_CHECK_DEPLOYER_FUNDED_DELAY,
                 "SAFE_CHECK_DEPLOYER_FUNDED_RETRIES": settings.SAFE_CHECK_DEPLOYER_FUNDED_RETRIES,
+                "SAFE_CONTRACT_ADDRESS": settings.SAFE_CONTRACT_ADDRESS,
                 "SAFE_DEFAULT_CALLBACK_HANDLER": settings.SAFE_DEFAULT_CALLBACK_HANDLER,
                 "SAFE_FIXED_CREATION_COST": settings.SAFE_FIXED_CREATION_COST,
                 "SAFE_FUNDER_MAX_ETH": settings.SAFE_FUNDER_MAX_ETH,
-                "SAFE_FUNDER_PUBLIC_KEY": safe_funder_public_key,
+                "SAFE_FUNDER_ADDRESS": safe_funder_address,
                 "SAFE_FUNDING_CONFIRMATIONS": settings.SAFE_FUNDING_CONFIRMATIONS,
                 "SAFE_PROXY_FACTORY_ADDRESS": settings.SAFE_PROXY_FACTORY_ADDRESS,
                 "SAFE_PROXY_FACTORY_V1_0_0_ADDRESS": settings.SAFE_PROXY_FACTORY_V1_0_0_ADDRESS,
                 "SAFE_TX_NOT_MINED_ALERT_MINUTES": settings.SAFE_TX_NOT_MINED_ALERT_MINUTES,
-                "SAFE_TX_SENDER_PUBLIC_KEY": safe_sender_public_key,
+                "SAFE_TX_SENDER_ADDRESS": safe_sender_address,
                 "SAFE_V0_0_1_CONTRACT_ADDRESS": settings.SAFE_V0_0_1_CONTRACT_ADDRESS,
                 "SAFE_V1_0_0_CONTRACT_ADDRESS": settings.SAFE_V1_0_0_CONTRACT_ADDRESS,
-                "SAFE_V1_1_1_CONTRACT_ADDRESS": settings.SAFE_V1_1_1_CONTRACT_ADDRESS,
-                "SAFE_CONTRACT_ADDRESS": settings.SAFE_CONTRACT_ADDRESS,
                 "SAFE_VALID_CONTRACT_ADDRESSES": settings.SAFE_VALID_CONTRACT_ADDRESSES,
             },
         }
@@ -587,3 +601,54 @@ class PrivateSafesView(ListAPIView):
     permission_classes = (IsAuthenticated,)
     queryset = SafeContract.objects.deployed().order_by("created")
     serializer_class = SafeContractSerializer
+
+
+class InfuraRelayCreateView(APIView):
+    serializer_class = InfuraTxSerializer
+
+    @swagger_auto_schema(
+        operation_id="v1_infura_transactions_create",
+        responses={
+            201: InfuraTxResponseSerializer(),
+            400: "Data not valid",
+            404: "Safe not found",
+            422: "Safe address checksum not valid/Tx not valid",
+        },
+    )
+    def post(self, request, format=None):
+        serializer = self.serializer_class(data=request.data)
+
+        if not serializer.is_valid():
+            return Response(status=status.HTTP_400_BAD_REQUEST, data=serializer.errors)
+        else:
+            data = serializer.validated_data
+            infura_tx_sent = InfuraRelayServiceProvider().send_transaction(
+                data["to"], data["data"]
+            )
+            response_serializer = InfuraTxResponseSerializer(infura_tx_sent)
+            return Response(
+                status=status.HTTP_201_CREATED, data=response_serializer.data
+            )
+
+
+class InfuraRelayRetrieveView(APIView):
+    serializer_class = InfuraTxStatusResponseSerializer
+
+    @swagger_auto_schema(
+        operation_id="v1_infura_transactions_get",
+        responses={
+            200: InfuraTxStatusResponseSerializer(),
+            422: "Safe address checksum not valid",
+        },
+    )
+    def get(self, request, infura_tx_hash):
+        transaction_status = InfuraRelayServiceProvider().get_transaction_status(
+            infura_tx_hash
+        )
+        if not transaction_status:
+            return Response(
+                status=status.HTTP_404_NOT_FOUND, data="Transaction not found"
+            )
+        else:
+            response_serializer = self.serializer_class(transaction_status)
+            return Response(status=status.HTTP_200_OK, data=response_serializer.data)

@@ -92,6 +92,11 @@ class SafeRelayMultisigTxSerializer(SafeMultisigTxSerializer):
         return refund_receiver
 
 
+class InfuraTxSerializer(serializers.Serializer):
+    to = EthereumAddressField()
+    data = HexadecimalField()
+
+
 # ================================================ #
 #                Responses                         #
 # ================================================ #
@@ -318,3 +323,19 @@ class TransactionEstimationWithNonceAndGasTokensResponseSerializer(
     safe_tx_gas = serializers.CharField()
     operational_gas = serializers.CharField()
     estimations = TransactionGasTokenEstimationResponseSerializer(many=True)
+
+
+class InfuraTxResponseSerializer(serializers.Serializer):
+    infura_tx_hash = Sha3HashField()
+    tx_hash = Sha3HashField(allow_null=True)
+
+
+class InfuraTxStatusNestedResponseSerializer(serializers.Serializer):
+    broadcast_time = serializers.CharField()
+    eth_tx_hash = serializers.CharField()
+    gas_price = serializers.CharField()
+
+
+class InfuraTxStatusResponseSerializer(serializers.Serializer):
+    received_time = serializers.CharField()
+    broadcasts = serializers.ListField(child=InfuraTxStatusNestedResponseSerializer())
